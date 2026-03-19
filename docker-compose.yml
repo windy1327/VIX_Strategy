@@ -1,0 +1,9 @@
+services:
+  vix-strategy:
+    build: .
+    container_name: vix-strategy
+    env_file:
+      - .env
+    volumes:
+      - ./state:/app/state
+    restart: unless-stopped
