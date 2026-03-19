@@ -23,6 +23,9 @@ STATE_FILE = STATE_DIR / f"state_{TRADE_SYMBOL}_{STRATEGY_MODE}.json"
 RUN_MODE = os.getenv("RUN_MODE", "daily").strip().lower()
 RUN_ON_START = os.getenv("RUN_ON_START", "true").lower() == "true"
 RUN_TIME_UTC = os.getenv("RUN_TIME_UTC", "22:30").strip()
+YF_MAX_RETRIES = int(os.getenv("YF_MAX_RETRIES", "5"))
+YF_RETRY_BASE_SECONDS = int(os.getenv("YF_RETRY_BASE_SECONDS", "30"))
+YF_BATCH_DELAY_SECONDS = int(os.getenv("YF_BATCH_DELAY_SECONDS", "2"))
 
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -45,23 +48,53 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return rsi.fillna(100)
 
 
+def _download_symbol(symbol: str) -> pd.DataFrame:
+    last_error = None
+    for attempt in range(1, YF_MAX_RETRIES + 1):
+        try:
+            df = yf.download(
+                symbol,
+                period=f"{LOOKBACK_PERIOD}d",
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+            if df.empty:
+                raise RuntimeError(f"No data downloaded from yfinance for {symbol}")
+            return df
+        except Exception as e:
+            last_error = e
+            is_rate_limit = "YFRateLimitError" in type(e).__name__ or "Too Many Requests" in str(e)
+            if attempt >= YF_MAX_RETRIES:
+                break
+            sleep_seconds = YF_RETRY_BASE_SECONDS * (2 ** (attempt - 1)) if is_rate_limit else YF_RETRY_BASE_SECONDS * attempt
+            print(
+                f"WARN: yfinance download failed for {symbol} on attempt {attempt}/{YF_MAX_RETRIES}: {e}. "
+                f"Retrying in {sleep_seconds} seconds..."
+            )
+            time.sleep(sleep_seconds)
+    raise RuntimeError(
+        f"Failed to download {symbol} from yfinance after {YF_MAX_RETRIES} attempts. "
+        f"Last error: {last_error}"
+    ) from last_error
+
+
 def load_data() -> pd.DataFrame:
     symbols = ["^VIX", "^GSPC", TRADE_SYMBOL]
-    raw = yf.download(symbols, period=f"{LOOKBACK_PERIOD}d", interval="1d", auto_adjust=False, progress=False)
-    if raw.empty:
-        raise RuntimeError("No data downloaded from yfinance")
+    frames = {}
+    for idx, symbol in enumerate(symbols):
+        frames[symbol] = _download_symbol(symbol)
+        if idx < len(symbols) - 1 and YF_BATCH_DELAY_SECONDS > 0:
+            time.sleep(YF_BATCH_DELAY_SECONDS)
 
-    if not isinstance(raw.columns, pd.MultiIndex):
-        raise RuntimeError("Unexpected yfinance column format")
-
-    close = raw["Close"].copy()
-    df = pd.DataFrame(index=close.index)
-    df["vix_close"] = close["^VIX"]
-    df["spx_close"] = close["^GSPC"]
-    df["asset_close"] = close[TRADE_SYMBOL]
-    df["asset_open"] = raw["Open"][TRADE_SYMBOL]
-    df["asset_high"] = raw["High"][TRADE_SYMBOL]
-    df["asset_low"] = raw["Low"][TRADE_SYMBOL]
+    df = pd.DataFrame(index=frames[TRADE_SYMBOL].index)
+    df["vix_close"] = frames["^VIX"]["Close"]
+    df["spx_close"] = frames["^GSPC"]["Close"]
+    df["asset_close"] = frames[TRADE_SYMBOL]["Close"]
+    df["asset_open"] = frames[TRADE_SYMBOL]["Open"]
+    df["asset_high"] = frames[TRADE_SYMBOL]["High"]
+    df["asset_low"] = frames[TRADE_SYMBOL]["Low"]
 
     df = df.dropna().copy()
     df["vix_ret_pct"] = df["vix_close"].pct_change() * 100

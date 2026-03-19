@@ -6,6 +6,7 @@
 - **每天收盘后跑一次**（默认 daily 模式）
 - **买入 / 卖出信号邮件通知**
 - 本地 `state.json` 去重，避免重复发同一信号
+- `yfinance` 限流时自动重试 + 退避等待
 
 ## 策略逻辑
 
@@ -50,6 +51,14 @@
 - 更准确地说：它适合 **日线收盘后策略**，不适合毫秒级/盘口级实盘
 
 所以对于你这个策略，**每天收盘后运行一次是合适的**。
+
+### 限流说明
+云环境（如 Zeabur）有时会遇到 Yahoo Finance 的 `Too Many Requests` 限流。
+当前版本已经加入：
+- 单标的串行下载（避免一次性批量请求）
+- 自动重试
+- 指数退避等待
+- 可通过环境变量调整重试次数和等待时间
 
 ---
 
@@ -98,6 +107,9 @@ docker compose up --build -d
 - `RUN_MODE=daily` 或 `once`
 - `RUN_TIME_UTC=22:30`
 - `EMAIL_TO=your@email.com`
+- `YF_MAX_RETRIES=5`
+- `YF_RETRY_BASE_SECONDS=30`
+- `YF_BATCH_DELAY_SECONDS=2`
 
 ---
 
